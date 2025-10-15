@@ -20,7 +20,19 @@ export interface ChatResponse {
 
 export interface CallOpts {
   timeoutMs?: number;
-  retry?: { maxAttempts?: number; baseMs?: number; maxMs?: number; jitter?: "none"|"full" };
+  signal?: AbortSignal;
+  retry?: RetryOpts;
+}
+
+export interface RetryOpts {
+  maxAttempts?: number;
+  baseMs?: number;
+  maxMs?: number;
+  jitter?: "none" | "full";
+  signal?: AbortSignal;
+  maxTotalMs?: number;
+  onRetry?: (info: { attempt: number; waitMs: number; error: unknown }) => void;
+  statusRetry?: (status: number) => boolean;
 }
 
 export interface TokenEstimate { input: number; output?: number }
@@ -36,4 +48,29 @@ export interface MiddlewareContext {
   endTs?: number;
 }
 
-export type Middleware = (ctx: MiddlewareContext, next: () => Promise<void>) => Promise<void>;
+export type Middleware = (ctx: MiddlewareContext, next: () => Promise<any>) => Promise<void>;
+
+// Enhanced error types
+export class LLMError extends Error {
+  constructor(
+    message: string,
+    public readonly provider: string,
+    public readonly status?: number,
+    public readonly requestId?: string,
+    public readonly retryable: boolean = true,
+    public readonly retryAfter?: number
+  ) {
+    super(message);
+    this.name = 'LLMError';
+  }
+}
+
+// Event types for observability
+export type FeatherEvent =
+  | { type: "call.start"; provider: string; model: string; requestId?: string }
+  | { type: "call.success"; provider: string; model: string; costUSD?: number; requestId?: string }
+  | { type: "call.error"; provider: string; model: string; error: unknown; requestId?: string }
+  | { type: "call.retry"; attempt: number; waitMs: number; error: unknown; requestId?: string }
+  | { type: "rate.wait"; key: string; waitMs: number }
+  | { type: "breaker.open"; provider: string }
+  | { type: "breaker.close"; provider: string };

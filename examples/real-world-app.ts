@@ -93,13 +93,13 @@ async function streamingWithMiddleware() {
     },
     middleware: [
       // Logging middleware
-      async (ctx, next) => {
+      async (ctx: any, next) => {
         console.log(`📝 Request to ${ctx.provider}:${ctx.model}`);
         await next();
         console.log(`✅ Response from ${ctx.provider} (${ctx.endTs! - ctx.startTs}ms)`);
       },
       // Cost tracking middleware
-      async (ctx, next) => {
+      async (ctx: any, next) => {
         await next();
         if (ctx.response?.costUSD) {
           console.log(`💰 Cost: $${ctx.response.costUSD.toFixed(6)}`);

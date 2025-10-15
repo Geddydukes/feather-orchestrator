@@ -1,37 +1,55 @@
 
+import { z } from "zod";
 import { ProviderRegistry } from "../providers/registry.js";
 import { openai } from "../providers/openai.js";
 import { anthropic } from "../providers/anthropic.js";
 
-export interface FeatherConfig {
-  policy?: "cheapest" | "roundrobin" | "first";
-  providers?: {
-    openai?: { apiKeyEnv?: string; baseUrl?: string; models?: Array<{ name: string; aliases?: string[]; inputPer1K?: number; outputPer1K?: number }> };
-    anthropic?: { apiKeyEnv?: string; baseUrl?: string; models?: Array<{ name: string; aliases?: string[]; inputPer1K?: number; outputPer1K?: number }> };
-  };
-}
+const ModelSchema = z.object({
+  name: z.string(),
+  aliases: z.array(z.string()).optional(),
+  inputPer1K: z.number().optional(),
+  outputPer1K: z.number().optional(),
+  capabilities: z.array(z.enum(["chat", "stream", "json", "tools"])).optional()
+});
 
-export function buildRegistry(cfg: FeatherConfig): ProviderRegistry {
+const ProviderSchema = z.object({
+  apiKeyEnv: z.string().optional(),
+  baseUrl: z.string().url().optional(),
+  models: z.array(ModelSchema).optional()
+});
+
+const FeatherConfigSchema = z.object({
+  policy: z.enum(["cheapest", "roundrobin", "first"]).optional(),
+  providers: z.object({
+    openai: ProviderSchema.optional(),
+    anthropic: ProviderSchema.optional(),
+  }).optional()
+});
+
+export type FeatherConfig = z.infer<typeof FeatherConfigSchema>;
+
+export function buildRegistry(raw: unknown): ProviderRegistry {
+  const cfg = FeatherConfigSchema.parse(raw);
   const reg = new ProviderRegistry({ policy: cfg.policy });
-  if (cfg.providers?.openai) {
-    const key = process.env[cfg.providers.openai.apiKeyEnv ?? "OPENAI_API_KEY"];
-    if (key) {
-      reg.add({
-        key: "openai",
-        inst: openai({ apiKey: key, baseUrl: cfg.providers.openai.baseUrl }),
-        models: (cfg.providers.openai.models ?? []).map(m => ({ ...m }))
-      });
-    }
+
+  const add = (key: "openai" | "anthropic", inst: any, models?: any[]) => {
+    if (!inst) return;
+    reg.add({
+      key,
+      inst,
+      models: (models ?? []).map(m => ({ ...m }))
+    });
+  };
+
+  const oaiK = process.env[cfg.providers?.openai?.apiKeyEnv ?? "OPENAI_API_KEY"];
+  if (cfg.providers?.openai && oaiK) {
+    add("openai", openai({ apiKey: oaiK, baseUrl: cfg.providers.openai.baseUrl }), cfg.providers.openai.models);
   }
-  if (cfg.providers?.anthropic) {
-    const key = process.env[cfg.providers.anthropic.apiKeyEnv ?? "ANTHROPIC_API_KEY"];
-    if (key) {
-      reg.add({
-        key: "anthropic",
-        inst: anthropic({ apiKey: key, baseUrl: cfg.providers.anthropic.baseUrl }),
-        models: (cfg.providers.anthropic.models ?? []).map(m => ({ ...m }))
-      });
-    }
+  
+  const claudeK = process.env[cfg.providers?.anthropic?.apiKeyEnv ?? "ANTHROPIC_API_KEY"];
+  if (cfg.providers?.anthropic && claudeK) {
+    add("anthropic", anthropic({ apiKey: claudeK, baseUrl: cfg.providers.anthropic.baseUrl }), cfg.providers.anthropic.models);
   }
+  
   return reg;
 }
