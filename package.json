@@ -1,0 +1,69 @@
+{
+  "name": "feather-orchestrator",
+  "version": "0.1.0",
+  "description": "Tiny, fast, provider-agnostic LLM API orchestrator (fallback, race, rate limits, retries, streaming, cost, middleware).",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./cli": {
+      "import": "./dist/bin/feather.js"
+    }
+  },
+  "bin": {
+    "feather": "./dist/bin/feather.js"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build && npm run test",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "examples:chat": "node dist/examples/chat.js",
+    "examples:real-world": "node dist/examples/real-world-app.js",
+    "examples:agent-chaining": "node dist/examples/agent-chaining.js",
+    "lint": "tsc --noEmit",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "llm",
+    "orchestrator",
+    "openai",
+    "anthropic",
+    "chat",
+    "stream",
+    "rate-limit",
+    "retry",
+    "circuit-breaker",
+    "fallback",
+    "middleware",
+    "cost-tracking"
+  ],
+  "author": "Open Source Community",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/feather-orchestrator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/feather-orchestrator/issues"
+  },
+  "homepage": "https://github.com/your-username/feather-orchestrator#readme",
+  "devDependencies": {
+    "@types/node": "^24.7.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.1"
+  }
+}

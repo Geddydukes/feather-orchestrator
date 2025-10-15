@@ -1,0 +1,31 @@
+{
+  "policy": "cheapest",
+  "providers": {
+    "openai": {
+      "models": [
+        {
+          "name": "gpt-4.1-mini",
+          "aliases": [
+            "fast",
+            "balanced"
+          ],
+          "inputPer1K": 0.005,
+          "outputPer1K": 0.015
+        }
+      ]
+    },
+    "anthropic": {
+      "models": [
+        {
+          "name": "claude-3-5-haiku",
+          "aliases": [
+            "fast",
+            "haiku"
+          ],
+          "inputPer1K": 0.008,
+          "outputPer1K": 0.024
+        }
+      ]
+    }
+  }
+}
