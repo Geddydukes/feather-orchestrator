@@ -10,9 +10,7 @@ import {
   type AgentMemoryTurn,
   type AgentMessage,
   type AgentPlan,
-  type AgentPlanFinal,
   type AgentPlanAction,
-  type AgentPlannerResult,
   type AgentRunFailure,
   type AgentRunOptions,
   type AgentRunResult,
@@ -21,6 +19,7 @@ import {
   type AgentToolCollection,
   type AgentUserMessage
 } from "./types.js";
+import { isFinalPlan, normalizePlan } from "./plan.js";
 
 const DEFAULT_MAX_ITERATIONS = 8;
 const DEFAULT_MAX_ACTIONS = 4;
@@ -312,36 +311,6 @@ function normalizeUserMessage(message: AgentUserMessage): AgentUserMessage {
   return message;
 }
 
-function normalizePlan(result: AgentPlannerResult): AgentPlan {
-  if (!result || typeof result !== "object") {
-    throw new AgentError("INVALID_PLAN_FORMAT", "Planner must return an object");
-  }
-
-  if ("final" in result) {
-    const final = (result as { final?: AgentAssistantMessage | string }).final;
-    if (final === undefined) {
-      throw new AgentError("INVALID_PLAN_FINAL", "Planner returned a final plan without content");
-    }
-    return { final: normalizeAssistantMessage(final) };
-  }
-
-  if (!Array.isArray((result as { actions?: unknown }).actions)) {
-    throw new AgentError("INVALID_PLAN_FORMAT", "Planner must return either {final} or {actions}");
-  }
-
-  const actions = (result as { actions: Array<{ tool: string; input?: unknown }> }).actions.map((action, index) => {
-    if (!action || typeof action.tool !== "string" || action.tool.trim() === "") {
-      throw new AgentError(
-        "INVALID_PLAN_FORMAT",
-        `Plan action at index ${index} is missing a valid tool name`
-      );
-    }
-    return { tool: action.tool, input: action.input } satisfies AgentPlanAction;
-  });
-
-  return { actions };
-}
-
 function createSuccessResult(
   steps: AgentStepTrace[],
   runStart: number,
@@ -354,20 +323,6 @@ function createSuccessResult(
     iterationCount: steps.length,
     elapsedMs: performance.now() - runStart
   };
-}
-
-function normalizeAssistantMessage(message: AgentAssistantMessage | string): AgentAssistantMessage {
-  if (typeof message === "string") {
-    return { role: "assistant", content: message };
-  }
-  if (!message || message.role !== "assistant" || typeof message.content !== "string") {
-    throw new AgentError("INVALID_PLAN_FINAL", "Final plan output must be an assistant message or string");
-  }
-  return message;
-}
-
-function isFinalPlan(plan: AgentPlan): plan is AgentPlanFinal {
-  return "final" in plan;
 }
 
 function defaultTurnFactory<TTurn extends AgentMemoryTurn>(message: AgentMessage): TTurn {
