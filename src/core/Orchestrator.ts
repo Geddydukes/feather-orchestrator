@@ -4,7 +4,7 @@ import type { ChatProvider } from "../providers/base.js";
 import { withRetry } from "./retry.js";
 import { RateLimiter } from "./limiter.js";
 import { Breaker } from "./breaker.js";
-import { runMiddleware } from "./middleware.js";
+import { runMiddleware } from "./middleware/index.js";
 import { ProviderRegistry, type ProviderEntry } from "../providers/registry.js";
 
 export type ProviderSpec = { id: string; inst: ChatProvider; breaker: Breaker };
