@@ -32,9 +32,13 @@ export async function withRetry<T>(
       // Respect Retry-After header if present
       let wait = Math.min(cap, base * 2 ** (attempt - 1));
       const ra = e?.retryAfter ?? e?.info?.retryAfter;
-      if (typeof ra === "number") wait = Math.max(wait, ra * 1000);
-
-      const waitMs = jitter === "full" ? wait * (0.5 + Math.random()) : wait;
+      let waitMs: number;
+      if (typeof ra === "number") {
+        wait = Math.max(wait, ra * 1000);
+        waitMs = wait; // honor Retry-After without jitter
+      } else {
+        waitMs = jitter === "full" ? wait * (0.5 + Math.random()) : wait;
+      }
       if (opts.maxTotalMs && Date.now() + waitMs - start > opts.maxTotalMs) throw e;
 
       opts.onRetry?.({ attempt, waitMs, error: e });
