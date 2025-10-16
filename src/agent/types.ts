@@ -1,5 +1,8 @@
 import type { MemoryGetContextOptions, MemoryManager, MemoryTurn } from "../memory/types.js";
 import type { Tool } from "../tools/types.js";
+import type { ToolCache, ToolCacheOptions } from "../core/tool-cache.js";
+import type { AgentPolicyConfig, AgentPolicies } from "./policies.js";
+import type { AgentQuotaConfig, AgentQuotaManager } from "./quotas.js";
 
 export type AgentMessageRole = "system" | "user" | "assistant" | "tool";
 
@@ -69,6 +72,13 @@ export type Planner<TTurn extends AgentMemoryTurn = AgentMemoryTurn> = (
   context: PlannerContext<TTurn>
 ) => Promise<AgentPlannerResult> | AgentPlannerResult;
 
+export interface TokenUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  costUsd?: number;
+}
+
 export type AgentToolCollection =
   | Iterable<Tool>
   | Readonly<Record<string, Tool>>
@@ -84,6 +94,9 @@ export interface AgentConfig<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
   maxActionsPerPlan?: number;
   onEvent?: (event: AgentEvent) => void;
   createMemoryTurn?: (message: AgentMessage) => TTurn;
+  policies?: AgentPolicies | AgentPolicyConfig;
+  quotas?: AgentQuotaManager | AgentQuotaConfig;
+  toolCache?: ToolCache | ToolCacheOptions;
 }
 
 export interface AgentRunOptions {
@@ -102,6 +115,8 @@ export interface AgentActionTrace {
   startedAt: Date;
   finishedAt: Date;
   durationMs: number;
+  cacheHit: boolean;
+  audit?: unknown;
 }
 
 export interface AgentStepTrace {
@@ -118,6 +133,9 @@ export type AgentErrorCode =
   | "MAX_ACTIONS_EXCEEDED"
   | "UNKNOWN_TOOL"
   | "TOOL_EXECUTION_FAILED"
+  | "TOOL_NOT_ALLOWED"
+  | "TOOL_VALIDATION_FAILED"
+  | "QUOTA_EXCEEDED"
   | "MAX_ITERATIONS_EXCEEDED"
   | "UNEXPECTED_ERROR";
 
@@ -168,11 +186,21 @@ export type AgentEvent =
       agentId?: string;
     }
   | {
+      type: "agent.step.start";
+      sessionId: string;
+      iteration: number;
+      contextTurns: number;
+      contextTokens?: number;
+      startedAt: Date;
+      agentId?: string;
+    }
+  | {
       type: "agent.plan";
       sessionId: string;
       iteration: number;
       plan: AgentPlan;
       durationMs: number;
+      usage?: TokenUsage;
       agentId?: string;
     }
   | {
@@ -181,6 +209,7 @@ export type AgentEvent =
       iteration: number;
       action: AgentPlanAction;
       tool: string;
+      cached?: boolean;
       agentId?: string;
     }
   | {
@@ -191,6 +220,9 @@ export type AgentEvent =
       tool: string;
       result: unknown;
       durationMs: number;
+      cached?: boolean;
+      audit?: unknown;
+      usage?: TokenUsage;
       agentId?: string;
     }
   | {
@@ -201,6 +233,39 @@ export type AgentEvent =
       tool: string;
       error: unknown;
       durationMs: number;
+      cached?: boolean;
+      agentId?: string;
+    }
+  | {
+      type: "agent.tool.blocked";
+      sessionId: string;
+      iteration: number;
+      action: AgentPlanAction;
+      tool: string;
+      error: AgentError;
+      agentId?: string;
+    }
+  | {
+      type: "agent.step.done";
+      sessionId: string;
+      iteration: number;
+      status: "continue" | "final" | "error";
+      durationMs: number;
+      contextTurns: number;
+      contextTokens?: number;
+      plan?: AgentPlan;
+      actions?: AgentActionTrace[];
+      output?: AgentAssistantMessage;
+      error?: AgentError;
+      agentId?: string;
+    }
+  | {
+      type: "agent.quota.blocked";
+      sessionId: string;
+      iteration: number;
+      action: AgentPlanAction;
+      tool: string;
+      error: AgentError;
       agentId?: string;
     }
   | {
@@ -219,5 +284,22 @@ export type AgentEvent =
       steps: AgentStepTrace[];
       iterationCount: number;
       elapsedMs: number;
+      agentId?: string;
+    }
+  | {
+      type: "agent.memory.append";
+      sessionId: string;
+      turn: MemoryTurn;
+      agentId?: string;
+    }
+  | {
+      type: "agent.memory.summarize";
+      sessionId: string;
+      agentId?: string;
+    }
+  | {
+      type: "agent.memory.trim";
+      sessionId: string;
+      retainTurns?: number;
       agentId?: string;
     };

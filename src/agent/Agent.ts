@@ -1,4 +1,21 @@
 import { performance } from "node:perf_hooks";
+import type { MemoryGetContextOptions, MemoryManager } from "../memory/types.js";
+import type { Tool } from "../tools/types.js";
+import { ToolCache, type ToolCacheDecision, type ToolCacheOptions, isToolCache } from "../core/tool-cache.js";
+import {
+  createPolicyManager,
+  isAgentPolicies,
+  type AgentPolicies,
+  type ToolPolicyEvaluation
+} from "./policies.js";
+import {
+  createQuotaManager,
+  isAgentQuotaManager,
+  type AgentQuotaManager
+} from "./quotas.js";
+import {
+  AgentError,
+  type AgentErrorCode,
 import type { MemoryGetContextOptions } from "../memory/types.js";
 import type { Tool } from "../tools/types.js";
 import {
@@ -17,6 +34,11 @@ import {
   type AgentRunSuccess,
   type AgentStepTrace,
   type AgentToolCollection,
+  type TokenUsage,
+  type AgentUserMessage
+} from "./types.js";
+import { isFinalPlan, normalizePlan } from "./plan.js";
+import { withMemoryEventing } from "../telemetry/events.js";
   type AgentUserMessage
 } from "./types.js";
 import { isFinalPlan, normalizePlan } from "./plan.js";
@@ -28,6 +50,10 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
   private readonly tools: Map<string, Tool>;
   private readonly maxIterations: number;
   private readonly maxActionsPerPlan: number;
+  private readonly policies?: AgentPolicies;
+  private readonly quotas?: AgentQuotaManager;
+  private readonly toolCache?: ToolCache;
+  private readonly memory: MemoryManager<TTurn>;
 
   constructor(private readonly config: AgentConfig<TTurn>) {
     if (!config) {
@@ -48,6 +74,15 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
     if (this.maxActionsPerPlan < 1) {
       throw new Error("maxActionsPerPlan must be at least 1");
     }
+    this.policies = normalizePolicies(config.policies);
+    this.quotas = normalizeQuotas(config.quotas);
+    this.toolCache = normalizeToolCache(config.toolCache);
+    this.memory = config.onEvent
+      ? withMemoryEventing<TTurn>(config.memory, {
+          agentId: config.id,
+          emit: (event) => this.emit(event),
+        })
+      : config.memory;
   }
 
   get id(): string | undefined {
@@ -71,6 +106,7 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
     const runStart = performance.now();
 
     throwIfAborted(signal);
+    await this.memory.append(sessionId, this.toMemoryTurn(userInput));
     await this.config.memory.append(sessionId, this.toMemoryTurn(userInput));
     this.emit({
       type: "agent.run.start",
@@ -89,6 +125,21 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
           throw new AgentError("MAX_ITERATIONS_EXCEEDED", `Reached iteration cap of ${maxIterations}`);
         }
 
+        const stepStartedAt = new Date();
+        const stepHrStart = performance.now();
+        const context = await this.memory.getContext(sessionId, contextOptions);
+        const contextStats = summariseContext(context);
+
+        this.emit({
+          type: "agent.step.start",
+          sessionId,
+          iteration,
+          contextTurns: contextStats.turns,
+          contextTokens: contextStats.tokens,
+          startedAt: stepStartedAt,
+          agentId: this.id,
+        });
+
         const context = await this.config.memory.getContext(sessionId, contextOptions);
         const planStart = performance.now();
         const plannerResult = await this.config.planner({
@@ -100,6 +151,7 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
           signal
         });
         const planDuration = performance.now() - planStart;
+        const planUsage = extractTokenUsage(plannerResult);
         const plan = normalizePlan(plannerResult);
 
         this.emit({
@@ -108,6 +160,55 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
           iteration,
           plan,
           durationMs: planDuration,
+          usage: planUsage,
+          agentId: this.id
+        });
+
+        let stepTrace: AgentStepTrace | undefined;
+        try {
+          stepTrace = { iteration, plan, actions: [] };
+
+          if (isFinalPlan(plan)) {
+            const assistantTurn = this.toMemoryTurn(plan.final);
+            await this.memory.append(sessionId, assistantTurn);
+            steps.push(stepTrace);
+            const elapsedMs = performance.now() - stepHrStart;
+            this.emit({
+              type: "agent.step.done",
+              sessionId,
+              iteration,
+              status: "final",
+              durationMs: elapsedMs,
+              contextTurns: contextStats.turns,
+              contextTokens: contextStats.tokens,
+              plan,
+              actions: stepTrace.actions,
+              output: plan.final,
+              agentId: this.id,
+            });
+            const success = createSuccessResult(steps, runStart, plan.final);
+            this.emit({
+              type: "agent.run.complete",
+              sessionId,
+              output: success.output,
+              steps: success.steps,
+              iterationCount: success.iterationCount,
+              elapsedMs: success.elapsedMs,
+              agentId: this.id
+            });
+            return success;
+          }
+
+          if (plan.actions.length === 0) {
+            throw new AgentError("PLAN_EMPTY_ACTIONS", "Planner returned an empty action list");
+          }
+          if (plan.actions.length > this.maxActionsPerPlan) {
+            throw new AgentError(
+              "MAX_ACTIONS_EXCEEDED",
+              `Planner returned ${plan.actions.length} actions, exceeding limit of ${this.maxActionsPerPlan}`
+            );
+          }
+
           agentId: this.id
         });
 
@@ -145,6 +246,45 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
             const trace = await this.executeAction(sessionId, iteration, action, mergedMetadata, signal);
             stepTrace.actions.push(trace);
           }
+
+          steps.push(stepTrace);
+          const elapsedMs = performance.now() - stepHrStart;
+          this.emit({
+            type: "agent.step.done",
+            sessionId,
+            iteration,
+            status: "continue",
+            durationMs: elapsedMs,
+            contextTurns: contextStats.turns,
+            contextTokens: contextStats.tokens,
+            plan,
+            actions: stepTrace.actions,
+            agentId: this.id,
+          });
+          iteration += 1;
+        } catch (error) {
+          const agentError = error instanceof AgentError
+            ? error
+            : new AgentError("UNEXPECTED_ERROR", "Agent step failed", { cause: error });
+          const elapsedMs = performance.now() - stepHrStart;
+          this.emit({
+            type: "agent.step.done",
+            sessionId,
+            iteration,
+            status: "error",
+            durationMs: elapsedMs,
+            contextTurns: contextStats.turns,
+            contextTokens: contextStats.tokens,
+            plan: stepTrace?.plan,
+            actions: stepTrace?.actions,
+            error: agentError,
+            agentId: this.id,
+          });
+          if (stepTrace) {
+            steps.push(stepTrace);
+          }
+          throw agentError;
+        }
         } catch (error) {
           steps.push(stepTrace);
           throw error;
@@ -187,6 +327,76 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
     throwIfAborted(signal);
     const tool = this.tools.get(action.tool);
     if (!tool) {
+      throw new AgentError("UNKNOWN_TOOL", `Planner referenced unknown tool "${action.tool}"`);
+    }
+    const fallbackEvaluation: ToolPolicyEvaluation = {
+      action: { tool: action.tool, input: action.input },
+      input: action.input
+    };
+    const blockedAction = sanitizeBlockedAction(action);
+
+    let evaluation = fallbackEvaluation;
+    try {
+      if (this.policies) {
+        evaluation = this.policies.beforeTool({ sessionId, iteration, metadata, action }) ?? fallbackEvaluation;
+      }
+    } catch (error) {
+      const agentError = ensureAgentError(
+        error,
+        "TOOL_VALIDATION_FAILED",
+        `Tool "${tool.name}" blocked by policy`
+      );
+      this.emit({
+        type: "agent.tool.blocked",
+        sessionId,
+        iteration,
+        action: blockedAction,
+        tool: tool.name,
+        error: agentError,
+        agentId: this.id
+      });
+      throw agentError;
+    }
+
+    const actionForEvents = evaluation.action;
+    const toolInput = evaluation.input;
+
+    if (this.quotas) {
+      const quotaEventAction = this.policies ? actionForEvents : blockedAction;
+      try {
+        await this.quotas.consume({ sessionId, metadata, tool: tool.name });
+      } catch (error) {
+        const agentError = ensureAgentError(
+          error,
+          "QUOTA_EXCEEDED",
+          `Quota blocked tool "${tool.name}"`
+        );
+        this.emit({
+          type: "agent.quota.blocked",
+          sessionId,
+          iteration,
+          action: quotaEventAction,
+          tool: tool.name,
+          error: agentError,
+          agentId: this.id
+        });
+        throw agentError;
+      }
+    }
+
+    const cacheTtl = determineToolCacheTtl(tool, this.toolCache);
+    let cacheDecision: ToolCacheDecision | undefined;
+    let cacheHit = false;
+    if (this.toolCache && cacheTtl > 0) {
+      try {
+        cacheDecision = await this.toolCache.prepare({ tool: tool.name, args: toolInput });
+        cacheHit = Boolean(cacheDecision.hit);
+      } catch (error) {
+        console.warn("Tool cache prepare failed", error);
+        cacheDecision = { cacheable: false };
+      }
+    }
+
       throw new AgentError("UNKNOWN_TOOL", `Planner referenced unknown tool \"${action.tool}\"`);
     }
     const startedAt = new Date();
@@ -195,12 +405,35 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
       type: "agent.tool.start",
       sessionId,
       iteration,
+      action: actionForEvents,
+      tool: tool.name,
+      cached: cacheHit,
       action,
       tool: tool.name,
       agentId: this.id
     });
 
     let result: unknown;
+    if (cacheHit && cacheDecision?.hit) {
+      result = cacheDecision.hit.value;
+    } else {
+      try {
+        result = await tool.run(toolInput, { signal, metadata });
+      } catch (error) {
+        const durationMs = performance.now() - startHr;
+        this.emit({
+          type: "agent.tool.error",
+          sessionId,
+          iteration,
+          action: actionForEvents,
+          tool: tool.name,
+          error,
+          durationMs,
+          cached: false,
+          agentId: this.id
+        });
+        throw new AgentError("TOOL_EXECUTION_FAILED", `Tool "${tool.name}" failed`, { cause: error });
+      }
     try {
       result = await tool.run(action.input, { signal, metadata });
     } catch (error) {
@@ -221,10 +454,71 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
     const durationMs = performance.now() - startHr;
     const finishedAt = new Date();
 
+    let sanitizedResult = result;
+    let auditPayload: unknown | undefined;
+    if (this.policies) {
+      try {
+        const outcome = this.policies.afterTool(
+          result,
+          { sessionId, iteration, metadata, action: actionForEvents, input: toolInput },
+          evaluation
+        );
+        sanitizedResult = outcome.result;
+        auditPayload = outcome.audit;
+      } catch (error) {
+        const agentError = ensureAgentError(
+          error,
+          "TOOL_VALIDATION_FAILED",
+          `Tool "${tool.name}" result rejected by policy`
+        );
+        this.emit({
+          type: "agent.tool.error",
+          sessionId,
+          iteration,
+          action: actionForEvents,
+          tool: tool.name,
+          error: agentError,
+          durationMs,
+          cached: cacheHit,
+          agentId: this.id
+        });
+        throw agentError;
+      }
+    }
+
+    if (!cacheHit && cacheDecision?.cacheable && this.toolCache && cacheTtl > 0) {
+      try {
+        await this.toolCache.write(cacheDecision, sanitizedResult, cacheTtl);
+      } catch (error) {
+        console.warn("Tool cache write failed", error);
+      }
+    }
+
     this.emit({
       type: "agent.tool.end",
       sessionId,
       iteration,
+      action: actionForEvents,
+      tool: tool.name,
+      result: sanitizedResult,
+      durationMs,
+      cached: cacheHit,
+      audit: auditPayload,
+      agentId: this.id
+    });
+
+    const observation = this.toMemoryTurn({ role: "tool", name: tool.name, content: sanitizedResult });
+    await this.memory.append(sessionId, observation);
+
+    return {
+      tool: tool.name,
+      input: actionForEvents.input,
+      result: sanitizedResult,
+      startedAt,
+      finishedAt,
+      durationMs,
+      cacheHit,
+      audit: auditPayload
       action,
       tool: tool.name,
       result,
@@ -325,6 +619,42 @@ function createSuccessResult(
   };
 }
 
+function summariseContext(context: readonly AgentMemoryTurn[]): { turns: number; tokens?: number } {
+  let totalTokens: number | undefined;
+  for (const turn of context) {
+    const tokens = turn.tokens;
+    if (tokens != null) {
+      totalTokens = (totalTokens ?? 0) + tokens;
+    }
+  }
+  return { turns: context.length, tokens: totalTokens };
+}
+
+function extractTokenUsage(value: unknown): TokenUsage | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const usage = (value as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== "object") {
+    return undefined;
+  }
+  const candidate = usage as Record<string, unknown>;
+  const normalized: TokenUsage = {};
+  if (typeof candidate.promptTokens === "number") {
+    normalized.promptTokens = candidate.promptTokens;
+  }
+  if (typeof candidate.completionTokens === "number") {
+    normalized.completionTokens = candidate.completionTokens;
+  }
+  if (typeof candidate.totalTokens === "number") {
+    normalized.totalTokens = candidate.totalTokens;
+  }
+  if (typeof candidate.costUsd === "number") {
+    normalized.costUsd = candidate.costUsd;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 function defaultTurnFactory<TTurn extends AgentMemoryTurn>(message: AgentMessage): TTurn {
   const turn: AgentMemoryTurn = {
     role: message.role,
@@ -351,4 +681,59 @@ function mergeMetadata(
     return undefined;
   }
   return { ...(base ?? {}), ...(override ?? {}) };
+}
+
+function normalizePolicies(
+  policies: AgentConfig["policies"]
+): AgentPolicies | undefined {
+  if (!policies) {
+    return undefined;
+  }
+  if (isAgentPolicies(policies)) {
+    return policies;
+  }
+  return createPolicyManager(policies);
+}
+
+function normalizeQuotas(quotas: AgentConfig["quotas"]): AgentQuotaManager | undefined {
+  if (!quotas) {
+    return undefined;
+  }
+  if (isAgentQuotaManager(quotas)) {
+    return quotas;
+  }
+  return createQuotaManager(quotas);
+}
+
+function normalizeToolCache(toolCache: AgentConfig["toolCache"]): ToolCache | undefined {
+  if (!toolCache) {
+    return undefined;
+  }
+  if (isToolCache(toolCache)) {
+    return toolCache;
+  }
+  return new ToolCache(toolCache as ToolCacheOptions);
+}
+
+function determineToolCacheTtl(tool: Tool, cache: ToolCache | undefined): number {
+  if (!cache) {
+    return 0;
+  }
+  const ttl = typeof tool.cacheTtlSec === "number" ? tool.cacheTtlSec : 0;
+  return ttl > 0 ? ttl : 0;
+}
+
+function sanitizeBlockedAction(action: AgentPlanAction): AgentPlanAction {
+  return { tool: action.tool, input: undefined };
+}
+
+function ensureAgentError(
+  error: unknown,
+  fallbackCode: AgentErrorCode,
+  fallbackMessage: string
+): AgentError {
+  if (error instanceof AgentError) {
+    return error;
+  }
+  return new AgentError(fallbackCode, fallbackMessage, { cause: error });
 }

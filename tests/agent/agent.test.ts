@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Agent } from "../../src/agent/Agent.js";
+import { ToolCache } from "../../src/core/tool-cache.js";
 import type {
   AgentAssistantMessage,
   AgentMemoryTurn,
@@ -79,6 +80,7 @@ describe("Agent", () => {
     expect(success.steps).toHaveLength(2);
     expect(success.steps[0].actions).toHaveLength(1);
     expect(success.steps[0].actions[0].result).toBe("hello");
+    expect(success.steps[0].actions[0].cacheHit).toBe(false);
 
     const history = memory.snapshot("session-1");
     expect(history.map((turn) => turn.role)).toEqual(["user", "tool", "assistant"]);
@@ -134,5 +136,44 @@ describe("Agent", () => {
     const failure = result as AgentRunFailure;
     expect(failure.error.code).toBe("MAX_ITERATIONS_EXCEEDED");
     expect(failure.steps).toHaveLength(1);
+  });
+
+  it("serves cached tool results when configured", async () => {
+    const memory = new TestMemory();
+    const runSpy = vi.fn(async ({ value }: { value: number }) => ({ doubled: value * 2 }));
+    const expensiveTool: Tool<{ value: number }, { doubled: number }> = {
+      name: "expensive",
+      description: "Double a value",
+      cacheTtlSec: 120,
+      run: runSpy
+    };
+
+    const planner = async (): Promise<AgentPlannerResult> => ({
+      actions: [
+        { tool: "expensive", input: { value: 2 } },
+        { tool: "expensive", input: { value: 2 } }
+      ]
+    });
+
+    const agent = new Agent({
+      planner,
+      memory,
+      tools: [expensiveTool],
+      toolCache: new ToolCache()
+    });
+
+    const result = await agent.run({
+      sessionId: "cache", 
+      input: { role: "user", content: "compute" }
+    });
+
+    expect(runSpy).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("completed");
+    const success = result as AgentRunSuccess;
+    expect(success.steps[0].actions).toHaveLength(2);
+    expect(success.steps[0].actions[0].cacheHit).toBe(false);
+    expect(success.steps[0].actions[1].cacheHit).toBe(true);
+    expect(success.steps[0].actions[0].result).toEqual({ doubled: 4 });
+    expect(success.steps[0].actions[1].result).toEqual({ doubled: 4 });
   });
 });
