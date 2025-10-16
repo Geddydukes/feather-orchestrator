@@ -16,6 +16,10 @@ import {
 import {
   AgentError,
   type AgentErrorCode,
+import type { MemoryGetContextOptions } from "../memory/types.js";
+import type { Tool } from "../tools/types.js";
+import {
+  AgentError,
   type AgentActionTrace,
   type AgentAssistantMessage,
   type AgentConfig,
@@ -35,6 +39,9 @@ import {
 } from "./types.js";
 import { isFinalPlan, normalizePlan } from "./plan.js";
 import { withMemoryEventing } from "../telemetry/events.js";
+  type AgentUserMessage
+} from "./types.js";
+import { isFinalPlan, normalizePlan } from "./plan.js";
 
 const DEFAULT_MAX_ITERATIONS = 8;
 const DEFAULT_MAX_ACTIONS = 4;
@@ -100,6 +107,7 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
 
     throwIfAborted(signal);
     await this.memory.append(sessionId, this.toMemoryTurn(userInput));
+    await this.config.memory.append(sessionId, this.toMemoryTurn(userInput));
     this.emit({
       type: "agent.run.start",
       sessionId,
@@ -132,6 +140,7 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
           agentId: this.id,
         });
 
+        const context = await this.config.memory.getContext(sessionId, contextOptions);
         const planStart = performance.now();
         const plannerResult = await this.config.planner({
           sessionId,
@@ -200,6 +209,39 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
             );
           }
 
+          agentId: this.id
+        });
+
+        const stepTrace: AgentStepTrace = { iteration, plan, actions: [] };
+
+        if (isFinalPlan(plan)) {
+          const assistantTurn = this.toMemoryTurn(plan.final);
+          await this.config.memory.append(sessionId, assistantTurn);
+          steps.push(stepTrace);
+          const success = createSuccessResult(steps, runStart, plan.final);
+          this.emit({
+            type: "agent.run.complete",
+            sessionId,
+            output: success.output,
+            steps: success.steps,
+            iterationCount: success.iterationCount,
+            elapsedMs: success.elapsedMs,
+            agentId: this.id
+          });
+          return success;
+        }
+
+        if (plan.actions.length === 0) {
+          throw new AgentError("PLAN_EMPTY_ACTIONS", "Planner returned an empty action list");
+        }
+        if (plan.actions.length > this.maxActionsPerPlan) {
+          throw new AgentError(
+            "MAX_ACTIONS_EXCEEDED",
+            `Planner returned ${plan.actions.length} actions, exceeding limit of ${this.maxActionsPerPlan}`
+          );
+        }
+
+        try {
           for (const action of plan.actions) {
             const trace = await this.executeAction(sessionId, iteration, action, mergedMetadata, signal);
             stepTrace.actions.push(trace);
@@ -243,6 +285,13 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
           }
           throw agentError;
         }
+        } catch (error) {
+          steps.push(stepTrace);
+          throw error;
+        }
+
+        steps.push(stepTrace);
+        iteration += 1;
       }
     } catch (error) {
       const agentError = error instanceof AgentError
@@ -348,6 +397,8 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
       }
     }
 
+      throw new AgentError("UNKNOWN_TOOL", `Planner referenced unknown tool \"${action.tool}\"`);
+    }
     const startedAt = new Date();
     const startHr = performance.now();
     this.emit({
@@ -357,6 +408,8 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
       action: actionForEvents,
       tool: tool.name,
       cached: cacheHit,
+      action,
+      tool: tool.name,
       agentId: this.id
     });
 
@@ -381,6 +434,21 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
         });
         throw new AgentError("TOOL_EXECUTION_FAILED", `Tool "${tool.name}" failed`, { cause: error });
       }
+    try {
+      result = await tool.run(action.input, { signal, metadata });
+    } catch (error) {
+      const durationMs = performance.now() - startHr;
+      this.emit({
+        type: "agent.tool.error",
+        sessionId,
+        iteration,
+        action,
+        tool: tool.name,
+        error,
+        durationMs,
+        agentId: this.id
+      });
+      throw new AgentError("TOOL_EXECUTION_FAILED", `Tool \"${tool.name}\" failed`, { cause: error });
     }
 
     const durationMs = performance.now() - startHr;
@@ -451,6 +519,23 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
       durationMs,
       cacheHit,
       audit: auditPayload
+      action,
+      tool: tool.name,
+      result,
+      durationMs,
+      agentId: this.id
+    });
+
+    const observation = this.toMemoryTurn({ role: "tool", name: tool.name, content: result });
+    await this.config.memory.append(sessionId, observation);
+
+    return {
+      tool: tool.name,
+      input: action.input,
+      result,
+      startedAt,
+      finishedAt,
+      durationMs
     };
   }
 
