@@ -19,6 +19,13 @@ A **tiny, fast, dependency-light** LLM orchestrator that provides a unified API 
 - 📦 **Zero Dependencies**: Uses native Node.js `fetch`
 - 🎨 **TypeScript**: Full type safety
 
+### 🧠 Memory System
+
+- Session-aware context retrieval with automatic summarization and truncation
+- Pluggable backends: in-memory (default), Redis, and PostgreSQL
+- Production features: TTLs, metadata, rate-limit friendly access patterns, and optional telemetry hooks
+- Integrates with the orchestrator via a single configuration option
+
 ## 🚀 Quick Start
 
 ### Installation
@@ -63,6 +70,35 @@ console.log(response.content);
 console.log(`Cost: $${response.costUSD}`);
 ```
 
+### Enable Session Memory
+
+```typescript
+import { Feather, InMemoryMemoryManager } from "feather-orchestrator";
+
+const memory = new InMemoryMemoryManager({
+  maxMessages: 100,
+  defaultTTLSeconds: 60 * 60
+});
+
+const feather = new Feather({
+  providers: {
+    openai: openai({ apiKey: process.env.OPENAI_API_KEY! })
+  },
+  memory
+});
+
+const response = await feather.chat({
+  provider: "openai",
+  model: "gpt-4",
+  session: { id: "user-123" },
+  messages: [
+    { role: "user", content: "Where did we leave off yesterday?" }
+  ]
+});
+
+console.log(response.content);
+```
+
 ## 📖 Complete API Reference
 
 ### Core Classes
@@ -79,6 +115,9 @@ interface FeatherOpts {
   retry?: CallOpts["retry"];
   timeoutMs?: number;
   middleware?: Middleware[];
+  memory?: MemoryManager;
+  defaultSessionTTLSeconds?: number;
+  defaultContextRequest?: MemoryContextRequest;
 }
 ```
 
