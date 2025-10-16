@@ -21,10 +21,40 @@ A **tiny, fast, dependency-light** LLM orchestrator that provides a unified API 
 
 ### 🧠 Memory System
 
-- Session-aware context retrieval with automatic summarization and truncation
-- Pluggable backends: in-memory (default), Redis, and PostgreSQL
-- Production features: TTLs, metadata, rate-limit friendly access patterns, and optional telemetry hooks
-- Integrates with the orchestrator via a single configuration option
+The orchestrator now ships with a production-ready conversation memory layer that can be enabled with a single configuration
+option. Every backend implements the same `MemoryManager` contract so teams can start with the in-memory adapter and graduate to
+Redis or PostgreSQL without rewriting application code.
+
+**Highlights**
+
+- Session-aware context retrieval with automatic summarization, truncation, and token budgeting helpers
+- Pluggable backends: in-memory (default), Redis, and PostgreSQL with identical TypeScript APIs
+- Production add-ons: TTLs, metadata, optimistic concurrency, and optional telemetry hooks for monitoring
+- Hooks for compression pipelines, background summarization, and retention policies to satisfy enterprise workloads
+
+**Architecture at a glance**
+
+| Capability | In-Memory | Redis | PostgreSQL |
+| --- | --- | --- | --- |
+| Persistence | Ephemeral, great for tests | Durable cache with TTL | Durable relational store |
+| Scaling | Single process | Horizontal via Redis cluster/sharding | Partitioning + connection pooling |
+| Compression | Hooks for custom compressors | Built-in gzip/Brotli adapters | Hybrid summaries + raw history |
+| Observability | Middleware events | Metrics & structured logging | Metrics, audit logs, retention jobs |
+
+Each adapter exposes the same primitives:
+
+```typescript
+interface MemoryManager {
+  loadSession(request: MemoryContextRequest): Promise<MemoryContext>;
+  appendMessages(session: SessionIdentifier, messages: MemoryMessage[]): Promise<void>;
+  summarize?(session: SessionIdentifier, options?: SummarizeOptions): Promise<SummaryResult>;
+  purge(session: SessionIdentifier): Promise<void>;
+}
+```
+
+When enabled, the orchestrator automatically hydrates prior context before a call and persists the augmented transcript once the
+provider responds. Applications can opt into hybrid retrieval (recent verbatim messages + rolling summaries) to stay within
+token limits without losing important details.
 
 ## 🚀 Quick Start
 
