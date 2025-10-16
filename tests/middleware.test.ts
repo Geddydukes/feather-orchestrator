@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { runMiddleware } from "../src/core/middleware.js";
+import { runMiddleware } from "../src/core/middleware/index.js";
 import type { Middleware } from "../src/types.js";
 
 describe("runMiddleware", () => {
