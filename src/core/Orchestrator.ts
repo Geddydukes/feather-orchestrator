@@ -1,6 +1,13 @@
 
 import type { ChatRequest, ChatResponse, ChatDelta, CallOpts, Middleware, FeatherEvent, RetryOpts } from "../types.js";
 import type { ChatProvider } from "../providers/base.js";
+import type {
+  MemoryContext,
+  MemoryContextRequest,
+  MemoryManager,
+  MemoryMessageInput,
+  MemoryWriteOptions
+} from "../memory/types.js";
 import { withRetry } from "./retry.js";
 import { RateLimiter } from "./limiter.js";
 import { Breaker } from "./breaker.js";
@@ -16,6 +23,19 @@ export interface FeatherOpts {
   retry?: RetryOpts;
   timeoutMs?: number;
   middleware?: Middleware[];
+  memory?: MemoryManager;
+  defaultSessionTTLSeconds?: number;
+  defaultContextRequest?: MemoryContextRequest;
+}
+
+export interface SessionOptions {
+  id: string;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  ttlSeconds?: number;
+  saveMessages?: boolean;
+  context?: MemoryContextRequest;
+  includeSummaryAsSystemMessage?: boolean;
 }
 
 export class Feather {
@@ -26,6 +46,7 @@ export class Feather {
   private middleware: Middleware[];
   public totalCostUSD = 0;
   public onEvent?: (e: FeatherEvent) => void;
+  private memory?: MemoryManager;
 
   constructor(private opts: FeatherOpts) {
     if (opts.registry) this.registry = opts.registry;
@@ -49,6 +70,7 @@ export class Feather {
     this.limiter = new RateLimiter(opts.limits ?? {});
     this.middleware = opts.middleware ?? [];
     this.retry = opts.retry ?? {};
+    this.memory = opts.memory;
   }
 
   private classifyError = (e: unknown): "soft" | "hard" => {
@@ -69,6 +91,7 @@ export class Feather {
     topP?: number;
     signal?: AbortSignal;
     timeoutMs?: number;
+    session?: SessionOptions;
   }, call?: CallOpts): Promise<ChatResponse> {
     // Input validation
     if (!args.messages || args.messages.length === 0) {
@@ -118,12 +141,18 @@ export class Feather {
 
       await this.limiter.take(`${p.inst.id}:${modelName}`, { signal });
 
-      const req: ChatRequest = { 
-        model: modelName, 
-        messages: args.messages, 
-        temperature: args.temperature, 
-        maxTokens: args.maxTokens, 
-        topP: args.topP 
+      const context = await this.prepareContext(args.session);
+
+      const combinedMessages = context
+        ? this.mergeContextMessages(context, args.messages, args.session)
+        : args.messages;
+
+      const req: ChatRequest = {
+        model: modelName,
+        messages: combinedMessages,
+        temperature: args.temperature,
+        maxTokens: args.maxTokens,
+        topP: args.topP
       };
       
       const ctx: any = { 
@@ -169,6 +198,7 @@ export class Feather {
             requestId 
           });
           
+          await this.persistMemory(args.session, args.messages, res);
           return res;
         } catch (e) {
           p.breaker.fail(e);
@@ -190,6 +220,76 @@ export class Feather {
       return runMiddleware(this.middleware, 0, ctx, terminal) as unknown as Promise<ChatResponse>;
     } finally {
       clearTimeout(timeoutId);
+    }
+  }
+
+  private async prepareContext(session?: SessionOptions): Promise<MemoryContext | undefined> {
+    if (!this.memory || !session?.id) return undefined;
+    try {
+      const request: MemoryContextRequest | undefined = session.context
+        ? { ...this.opts.defaultContextRequest, ...session.context }
+        : this.opts.defaultContextRequest;
+      return await this.memory.loadContext(session.id, request);
+    } catch (err) {
+      console.warn("Feather memory loadContext failed", err);
+      return undefined;
+    }
+  }
+
+  private mergeContextMessages(
+    context: MemoryContext,
+    freshMessages: ChatRequest["messages"],
+    session?: SessionOptions
+  ): ChatRequest["messages"] {
+    const includeSummary = session?.includeSummaryAsSystemMessage ?? true;
+    const history = context.messages.map((msg) => ({ role: msg.role, content: msg.content }));
+    const summaryPrefix = includeSummary && context.summary ? [{ role: "system" as const, content: context.summary }] : [];
+    return [...summaryPrefix, ...history, ...freshMessages];
+  }
+
+  private async persistMemory(
+    session: SessionOptions | undefined,
+    requestMessages: ChatRequest["messages"],
+    response: ChatResponse
+  ): Promise<void> {
+    if (!this.memory || !session?.id || session.saveMessages === false) {
+      return;
+    }
+
+    const ttlSeconds = session.ttlSeconds ?? this.opts.defaultSessionTTLSeconds;
+    const writeOpts: MemoryWriteOptions = {
+      metadata: session.metadata,
+      userId: session.userId,
+      ttlSeconds
+    };
+
+    const toPersist: MemoryMessageInput[] = [];
+    for (const msg of requestMessages) {
+      if (msg.role === "system") continue;
+      toPersist.push({ role: msg.role, content: msg.content });
+    }
+
+    if (response?.content) {
+      toPersist.push({
+        role: "assistant",
+        content: response.content,
+        tokens: response.tokens?.output
+      });
+    }
+
+    if (toPersist.length === 0) {
+      try {
+        await this.memory.touchSession(session.id, ttlSeconds);
+      } catch (err) {
+        console.warn("Feather memory touchSession failed", err);
+      }
+      return;
+    }
+
+    try {
+      await this.memory.appendMessages(session.id, toPersist, writeOpts);
+    } catch (err) {
+      console.warn("Feather memory appendMessages failed", err);
     }
   }
 

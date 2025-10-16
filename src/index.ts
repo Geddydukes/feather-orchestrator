@@ -7,3 +7,4 @@ export * from "./types.js";
 
 export * from "./providers/registry.js";
 export * from "./core/config.js";
+export * from "./memory/index.js";
