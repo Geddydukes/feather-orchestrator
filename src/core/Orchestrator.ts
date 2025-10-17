@@ -4,8 +4,9 @@ import type { ChatProvider } from "../providers/base.js";
 import { withRetry } from "./retry.js";
 import { RateLimiter } from "./limiter.js";
 import { Breaker } from "./breaker.js";
-import { runMiddleware } from "./middleware.js";
+import { runMiddleware } from "./middleware/index.js";
 import { ProviderRegistry, type ProviderEntry } from "../providers/registry.js";
+import { createAbortError, forwardAbortSignal } from "./abort.js";
 
 export type ProviderSpec = { id: string; inst: ChatProvider; breaker: Breaker };
 
@@ -108,9 +109,16 @@ export class Feather {
     }
 
     const ac = new AbortController();
-    const signal = args.signal ?? ac.signal;
+    const unlink = forwardAbortSignal(args.signal, ac);
+    const signal = ac.signal;
     const timeoutMs = args.timeoutMs ?? this.opts.timeoutMs ?? 60000;
     const timeoutId = setTimeout(() => ac.abort(), timeoutMs);
+
+    if (signal.aborted) {
+      clearTimeout(timeoutId);
+      unlink();
+      throw createAbortError(signal.reason);
+    }
 
     try {
       const requestId = crypto.randomUUID();
@@ -137,11 +145,11 @@ export class Feather {
       const terminal = async () => {
         try {
           const res = await withRetry(
-            () => p.inst.chat(req, { 
-              ...call, 
-              retry: call?.retry ?? this.retry, 
+            () => p.inst.chat(req, {
+              ...call,
+              retry: call?.retry ?? this.retry,
               signal,
-              timeoutMs 
+              timeoutMs
             }),
             {
               ...this.retry,
@@ -190,6 +198,7 @@ export class Feather {
       return runMiddleware(this.middleware, 0, ctx, terminal) as unknown as Promise<ChatResponse>;
     } finally {
       clearTimeout(timeoutId);
+      unlink();
     }
   }
 
@@ -240,8 +249,92 @@ export class Feather {
     const self = this;
     return {
       async chat(req: Omit<Parameters<Feather["chat"]>[0], "provider" | "model">) {
-        const tasks = specs.map(s => self.chat({ ...req, ...s }));
-        return Promise.any(tasks);
+        if (!specs.length) {
+          throw new Error("Feather.race requires at least one provider specification");
+        }
+
+        if (req.signal?.aborted) {
+          throw createAbortError(req.signal.reason);
+        }
+
+        const controllers = specs.map(() => new AbortController());
+        const cleanups: Array<() => void> = [];
+        const errors: unknown[] = new Array(specs.length);
+        let pending = specs.length;
+        let settled = false;
+
+        const abortLosers = (reason?: unknown) => {
+          for (const controller of controllers) {
+            if (!controller.signal.aborted) {
+              controller.abort(reason);
+            }
+          }
+        };
+
+        const runCleanups = () => {
+          while (cleanups.length) {
+            const cleanup = cleanups.pop();
+            cleanup?.();
+          }
+        };
+
+        return await new Promise<ChatResponse>((resolve, reject) => {
+          const rejectOnce = (error: unknown) => {
+            if (settled) return;
+            settled = true;
+            abortLosers(error);
+            runCleanups();
+            reject(error);
+          };
+
+          const handleAbort = () => {
+            rejectOnce(createAbortError(req.signal?.reason));
+          };
+
+          if (req.signal) {
+            if (req.signal.aborted) {
+              handleAbort();
+              return;
+            }
+            req.signal.addEventListener("abort", handleAbort, { once: true });
+            cleanups.push(() => req.signal?.removeEventListener("abort", handleAbort));
+          }
+
+          specs.forEach((spec, index) => {
+            const controller = controllers[index];
+            cleanups.push(forwardAbortSignal(req.signal, controller));
+
+            Promise.resolve()
+              .then(() => self.chat({ ...req, ...spec, signal: controller.signal }))
+              .then((response) => {
+                if (settled) {
+                  return;
+                }
+                settled = true;
+                abortLosers();
+                runCleanups();
+                resolve(response);
+              })
+              .catch((error) => {
+                if (settled) {
+                  return;
+                }
+                errors[index] = error;
+                pending -= 1;
+                if (pending === 0) {
+                  settled = true;
+                  abortLosers();
+                  runCleanups();
+                  const filtered = errors.filter((err) => err !== undefined);
+                  if (filtered.length === 1) {
+                    reject(filtered[0]);
+                  } else {
+                    reject(new AggregateError(filtered, "All providers failed"));
+                  }
+                }
+              });
+          });
+        });
       }
     };
   }

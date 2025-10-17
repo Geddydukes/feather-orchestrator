@@ -1,5 +1,6 @@
+import type { Middleware } from "../../types.js";
 
-import type { Middleware } from "../types.js";
+export { createPromptCacheMiddleware } from "./promptCache.js";
 
 export async function runMiddleware<T>(
   stack: Middleware[],
@@ -8,11 +9,11 @@ export async function runMiddleware<T>(
   terminal: () => Promise<T>
 ): Promise<T> {
   if (i >= stack.length) return terminal();
-  
+
   const layer = stack[i];
   let error: unknown;
   let done = false;
-  
+
   try {
     await layer(ctx, async () => {
       return await runMiddleware(stack, i + 1, ctx, terminal);

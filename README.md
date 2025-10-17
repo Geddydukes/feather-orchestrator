@@ -65,6 +65,19 @@ console.log(`Cost: $${response.costUSD}`);
 
 ## 📖 Complete API Reference
 
+### Agent framework
+
+The production-ready agent loop, memory backends, caching helpers, and guardrails now live alongside the core orchestrator. Start with the [Quick Start](docs/quick-start.md) guide and explore focused topics:
+
+- [Memory backends & context building](docs/memory.md)
+- [Prompt & tool caching](docs/prompt-caching.md)
+- [Policies, guardrails & quotas](docs/policies-quotas.md)
+- [Observability](docs/observability.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Subsystem overview](docs/overview.md)
+
+Examples in `examples/` and utilities in `scripts/` demonstrate full runs, caching, observability dashboards, and NDJSON trace replay.
+
 ### Core Classes
 
 #### `Feather`
