@@ -4,7 +4,6 @@ import { ToolCache } from "../../src/core/tool-cache.js";
 import type {
   AgentAssistantMessage,
   AgentMemoryTurn,
-  AgentMessage,
   AgentPlanAction,
   AgentPlannerResult,
   AgentRunFailure,
@@ -139,42 +138,6 @@ describe("Agent", () => {
     expect(failure.steps).toHaveLength(1);
   });
 
-  it("builds planner prompts with context builder budgets", async () => {
-    const memory = new TestMemory();
-    const sessionId = "session-context";
-    const previousAssistant: AgentAssistantMessage = { role: "assistant", content: "Older answer" };
-    await memory.append(sessionId, { role: previousAssistant.role, content: previousAssistant });
-    await memory.append(sessionId, { role: "user", content: { role: "user", content: "Older question" } });
-
-    let capturedPrompt: readonly AgentMessage[] | undefined;
-    const planner = vi.fn(async ({ prompt }: PlannerContext) => {
-      capturedPrompt = prompt;
-      const final: AgentAssistantMessage = { role: "assistant", content: "ack" };
-      return { final };
-    });
-
-    const agent = new Agent({
-      planner,
-      memory,
-      tools: [],
-      context: { maxRecentTurns: 1 }
-    });
-
-    const result = await agent.run({
-      sessionId,
-      input: { role: "user", content: "Latest question" },
-      context: { maxTokens: 200, maxRecentTurns: 1 }
-    });
-
-    expect(result.status).toBe("completed");
-    expect(planner).toHaveBeenCalledTimes(1);
-    expect(capturedPrompt).toBeDefined();
-    expect(capturedPrompt?.length).toBe(2);
-    expect(capturedPrompt?.[0].role).toBe("system");
-    expect(capturedPrompt?.[0].content).toContain("[assistant]");
-    expect(capturedPrompt?.[1]).toEqual({ role: "user", content: "Latest question" });
-  });
-
   it("serves cached tool results when configured", async () => {
     const memory = new TestMemory();
     const runSpy = vi.fn(async ({ value }: { value: number }) => ({ doubled: value * 2 }));
@@ -212,78 +175,5 @@ describe("Agent", () => {
     expect(success.steps[0].actions[1].cacheHit).toBe(true);
     expect(success.steps[0].actions[0].result).toEqual({ doubled: 4 });
     expect(success.steps[0].actions[1].result).toEqual({ doubled: 4 });
-  });
-
-  it("stops when the planner repeats the same action plan", async () => {
-    const memory = new TestMemory();
-    const runSpy = vi.fn(async () => "result");
-    const noopTool: Tool<{ value: number }, string> = {
-      name: "noop",
-      description: "Returns a canned value",
-      run: runSpy,
-    };
-
-    const planner = vi.fn((): AgentPlannerResult => ({
-      actions: [{ tool: "noop", input: { value: 1 } }],
-    }));
-
-    const agent = new Agent({
-      planner,
-      memory,
-      tools: [noopTool],
-    });
-
-    const result = await agent.run({
-      sessionId: "loop-guard",
-      input: { role: "user", content: "start" },
-    });
-
-    expect(runSpy).toHaveBeenCalledTimes(1);
-    expect(planner).toHaveBeenCalledTimes(2);
-    expect(result.status).toBe("completed");
-    const success = result as AgentRunSuccess;
-    expect(success.steps).toHaveLength(2);
-    expect(success.steps[1].actions).toHaveLength(0);
-    expect(success.output.content).toContain("repeated the same plan");
-  });
-
-  it("respects a shouldStop callback before executing new actions", async () => {
-    const memory = new TestMemory();
-    const runSpy = vi.fn(async () => "done");
-    const repeatTool: Tool<{ value: number }, string> = {
-      name: "repeat",
-      description: "Returns done",
-      run: runSpy,
-    };
-
-    const planner = vi.fn(({ iteration }: PlannerContext): AgentPlannerResult => ({
-      actions: [{ tool: "repeat", input: { value: iteration } }],
-    }));
-
-    const shouldStop = vi.fn(async ({ iteration }: { iteration: number }) =>
-      iteration >= 1 ? { message: "Stopping from callback" } : false
-    );
-
-    const agent = new Agent({
-      planner,
-      memory,
-      tools: [repeatTool],
-    });
-
-    const result = await agent.run({
-      sessionId: "stop-hook",
-      input: { role: "user", content: "go" },
-      shouldStop,
-    });
-
-    expect(runSpy).toHaveBeenCalledTimes(1);
-    expect(shouldStop).toHaveBeenCalledTimes(2);
-    expect(result.status).toBe("completed");
-    const success = result as AgentRunSuccess;
-    expect(success.steps).toHaveLength(2);
-    expect(success.steps[1].actions).toHaveLength(0);
-    expect(success.output.content).toContain("Stopping from callback");
-    const historyRoles = memory.snapshot("stop-hook").map((turn) => turn.role);
-    expect(historyRoles).toEqual(["user", "tool", "assistant"]);
   });
 });

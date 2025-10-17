@@ -41,27 +41,37 @@ function isAgentMessage(value: unknown): value is AgentMessage {
 
 function fromAgentMessage(message: AgentMessage): Message {
   switch (message.role) {
+  switch (content.role) {
     case "system":
     case "assistant":
     case "user": {
       return {
-        role: message.role,
-        content: stringify(message.content),
+        role: content.role,
+        content: stringify(content.content),
       } satisfies Message;
     }
     case "tool": {
       return {
         role: "tool",
-        content: stringify({ tool: message.name, output: message.content }),
+        content: stringify({ tool: content.name, output: content.content }),
       } satisfies Message;
     }
     default: {
       return {
         role: "system",
-        content: stringify(message),
+        content: stringify(content),
       } satisfies Message;
     }
   }
+}
+
+function isAgentMessage(value: unknown): value is AgentMessage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "role" in value &&
+    typeof (value as { role?: unknown }).role === "string"
+  );
 }
 
 function stringify(value: unknown): string {

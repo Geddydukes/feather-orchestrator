@@ -1,8 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ChatRequest } from "../types.js";
 
-export const PROMPT_CACHE_KEY_VERSION = "v1";
-
 export interface PromptKeyInput {
   provider: string;
   model: string;
@@ -25,7 +23,6 @@ export function createPromptCacheKey(input: PromptKeyInput): string {
   }
 
   const payload = {
-    version: PROMPT_CACHE_KEY_VERSION,
     provider: input.provider,
     model: input.model,
     request: sanitizeRequest(input.request),
@@ -34,14 +31,14 @@ export function createPromptCacheKey(input: PromptKeyInput): string {
 
   const serialised = stableStringify(payload);
   const hash = createHash("sha256").update(serialised).digest("hex");
-  return `prompt:${PROMPT_CACHE_KEY_VERSION}:${hash}`;
+  return `prompt:${hash}`;
 }
 
 function sanitizeRequest(request: ChatRequest): Record<string, unknown> {
   const normalised: Record<string, unknown> = {
     messages: request.messages?.map((message) => ({
       role: message.role,
-      content: normalizeWhitespace(message.content)
+      content: message.content
     })) ?? []
   };
 
@@ -56,10 +53,6 @@ function sanitizeRequest(request: ChatRequest): Record<string, unknown> {
   }
 
   return normalised;
-}
-
-function normalizeWhitespace(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
 }
 
 function stableStringify(value: unknown): string {

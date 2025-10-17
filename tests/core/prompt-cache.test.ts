@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { PromptCache, InMemoryPromptCacheStore } from "../../src/core/prompt-cache.js";
-import { createPromptCacheKey, PROMPT_CACHE_KEY_VERSION } from "../../src/core/prompt-key.js";
 import { createPromptCacheMiddleware } from "../../src/core/middleware/promptCache.js";
 import type { ChatRequest } from "../../src/types.js";
 
@@ -74,29 +73,5 @@ describe("PromptCache", () => {
     });
 
     expect(decision.cacheable).toBe(false);
-  });
-
-  it("normalizes content and prefixes keys with the cache version", () => {
-    const keyA = createPromptCacheKey({
-      provider: "openai",
-      model: "gpt-test",
-      request: {
-        model: "gpt-test",
-        messages: [{ role: "user", content: "Hello   world" }],
-        temperature: 0
-      }
-    });
-    const keyB = createPromptCacheKey({
-      provider: "openai",
-      model: "gpt-test",
-      request: {
-        model: "gpt-test",
-        messages: [{ role: "user", content: "Hello world" }],
-        temperature: 0
-      }
-    });
-
-    expect(keyA).toBe(keyB);
-    expect(keyA.startsWith(`prompt:${PROMPT_CACHE_KEY_VERSION}:`)).toBe(true);
   });
 });
