@@ -1,7 +1,15 @@
+import { createAbortError } from "./abort.js";
+
+interface QueueEntry {
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  cleanup?: () => void;
+}
 
 export class RateLimiter {
   private buckets = new Map<string, { tokens: number; last: number }>();
-  private queues = new Map<string, Array<{ resolve: () => void; signal?: AbortSignal }>>();
+  private queues = new Map<string, QueueEntry[]>();
 
   constructor(private rps: Record<string, { rps: number; burst?: number }>) {}
 
@@ -32,21 +40,43 @@ export class RateLimiter {
     this.queues.set(key, q);
     
     await new Promise<void>((resolve, reject) => {
-      const entry = { resolve, signal: opts?.signal };
-      q.push(entry);
-      
+      const entry: QueueEntry = {
+        resolve: () => {
+          cleanup();
+          resolve();
+        },
+        reject: (error) => {
+          cleanup();
+          reject(error);
+        },
+        signal: opts?.signal,
+      };
+
+      const cleanup = () => {
+        if (entry.cleanup) {
+          entry.cleanup();
+          entry.cleanup = undefined;
+        }
+      };
+
       const onAbort = () => {
         const idx = q.indexOf(entry);
-        if (idx >= 0) q.splice(idx, 1);
-        reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+        if (idx >= 0) {
+          q.splice(idx, 1);
+        }
+        entry.reject(createAbortError(opts?.signal?.reason));
       };
-      
-      if (opts?.signal?.aborted) {
-        onAbort();
-      } else {
-        opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
+      if (opts?.signal) {
+        if (opts.signal.aborted) {
+          onAbort();
+          return;
+        }
+        opts.signal.addEventListener("abort", onAbort, { once: true });
+        entry.cleanup = () => opts.signal?.removeEventListener("abort", onAbort);
       }
-      
+
+      q.push(entry);
       this.pump(key);
     });
   }

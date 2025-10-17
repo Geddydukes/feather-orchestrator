@@ -1,5 +1,6 @@
 
 import type { RetryOpts } from "../types.js";
+import { createAbortError } from "./abort.js";
 
 const defaultStatusRetry = (s: number) =>
   s === 408 || s === 429 || (s >= 500 && s <= 599);
@@ -17,7 +18,7 @@ export async function withRetry<T>(
 
   let attempt = 0;
   while (true) {
-    if (opts.signal?.aborted) throw createAbortError();
+    if (opts.signal?.aborted) throw createAbortError(opts.signal.reason);
     
     try {
       return await fn();
@@ -45,23 +46,37 @@ export async function withRetry<T>(
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const timeoutId = setTimeout(resolve, ms);
-    
-    if (signal) {
-      const onAbort = () => {
-        clearTimeout(timeoutId);
-        reject(createAbortError());
-      };
-      
-      if (signal.aborted) {
-        onAbort();
-      } else {
-        signal.addEventListener("abort", onAbort, { once: true });
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      settled = true;
+      cleanup();
+      resolve();
+    }, ms);
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      if (signal && abortListener) {
+        signal.removeEventListener("abort", abortListener);
       }
+    };
+
+    const abortListener = signal
+      ? () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          cleanup();
+          reject(createAbortError(signal.reason));
+        }
+      : undefined;
+
+    if (signal) {
+      if (signal.aborted) {
+        abortListener?.();
+        return;
+      }
+      signal.addEventListener("abort", abortListener!, { once: true });
     }
   });
-}
-
-function createAbortError(): Error {
-  return Object.assign(new Error("Aborted"), { name: "AbortError" });
 }
