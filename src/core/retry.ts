@@ -1,5 +1,6 @@
 
 import type { RetryOpts } from "../types.js";
+import { createAbortError } from "./abort.js";
 
 const defaultStatusRetry = (s: number) =>
   s === 408 || s === 429 || (s >= 500 && s <= 599);
@@ -17,7 +18,7 @@ export async function withRetry<T>(
 
   let attempt = 0;
   while (true) {
-    if (opts.signal?.aborted) throw createAbortError();
+    if (opts.signal?.aborted) throw createAbortError(opts.signal.reason);
     
     try {
       return await fn();
@@ -46,13 +47,13 @@ export async function withRetry<T>(
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const timeoutId = setTimeout(resolve, ms);
-    
+
     if (signal) {
       const onAbort = () => {
         clearTimeout(timeoutId);
-        reject(createAbortError());
+        reject(createAbortError(signal.reason));
       };
-      
+
       if (signal.aborted) {
         onAbort();
       } else {
@@ -60,8 +61,4 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
       }
     }
   });
-}
-
-function createAbortError(): Error {
-  return Object.assign(new Error("Aborted"), { name: "AbortError" });
 }

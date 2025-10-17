@@ -17,6 +17,12 @@ const middleware = createPromptCacheMiddleware({ cache });
 
 Attach the middleware to your planner pipeline or `Agent` configuration.
 
+### Cache key format
+
+Prompt cache keys include a schema version so deployments can invalidate stale entries when the key format evolves. The current
+shape is `prompt:v1:<sha256>` where `v1` identifies the canonical serialization. Message content is normalized before hashing so
+whitespace-only changes do not create distinct cache entries.【F:src/core/prompt-key.ts†L1-L75】
+
 ## Tool cache helper
 
 `ToolCache` offers deterministic hashing, TTL-aware storage, and safe cloning of cached results. Wrap expensive tools with `withToolCache` to hydrate results directly from cache during the agent loop. Cache events propagate through agent telemetry so observability dashboards display hit ratios per tool.【F:src/core/tool-cache.ts†L1-L216】【F:src/tools/cache.ts†L1-L87】

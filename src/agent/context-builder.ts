@@ -49,6 +49,17 @@ export class ContextBuilder {
     this.digestRole = options.digestRole ?? DEFAULT_DIGEST_ROLE;
   }
 
+  estimateTokens(messages: readonly AgentMessage[]): number {
+    if (!messages || messages.length === 0) {
+      return 0;
+    }
+    let total = 0;
+    for (const message of messages) {
+      total += this.countTokens(message);
+    }
+    return total;
+  }
+
   build(options: ContextBuildOptions): AgentMessage[] {
     if (!options) {
       throw new Error("Context build options are required");

@@ -7,6 +7,10 @@ export function turnsToMessages(turns: readonly AgentMemoryTurn[]): Message[] {
     .filter((message): message is Message => message !== null);
 }
 
+export function agentMessagesToMessages(messages: readonly AgentMessage[]): Message[] {
+  return messages.map((message) => fromAgentMessage(message));
+}
+
 function toMessage(turn: AgentMemoryTurn): Message | null {
   if (turn.role === "summary") {
     return {
@@ -23,6 +27,20 @@ function toMessage(turn: AgentMemoryTurn): Message | null {
     } satisfies Message;
   }
 
+  return fromAgentMessage(content);
+}
+
+function isAgentMessage(value: unknown): value is AgentMessage {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "role" in value &&
+    typeof (value as { role?: unknown }).role === "string"
+  );
+}
+
+function fromAgentMessage(message: AgentMessage): Message {
+  switch (message.role) {
   switch (content.role) {
     case "system":
     case "assistant":

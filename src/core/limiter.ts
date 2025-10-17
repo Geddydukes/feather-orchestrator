@@ -1,3 +1,4 @@
+import { createAbortError } from "./abort.js";
 
 export class RateLimiter {
   private buckets = new Map<string, { tokens: number; last: number }>();
@@ -38,7 +39,7 @@ export class RateLimiter {
       const onAbort = () => {
         const idx = q.indexOf(entry);
         if (idx >= 0) q.splice(idx, 1);
-        reject(Object.assign(new Error("Aborted"), { name: "AbortError" }));
+        reject(createAbortError(opts?.signal?.reason));
       };
       
       if (opts?.signal?.aborted) {

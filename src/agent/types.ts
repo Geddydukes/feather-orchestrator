@@ -3,6 +3,7 @@ import type { Tool } from "../tools/types.js";
 import type { ToolCache, ToolCacheOptions } from "../core/tool-cache.js";
 import type { AgentPolicyConfig, AgentPolicies } from "./policies.js";
 import type { AgentQuotaConfig, AgentQuotaManager } from "./quotas.js";
+import type { ContextBuilder, ContextBuilderOptions, ContextDigest } from "./context-builder.js";
 
 export type AgentMessageRole = "system" | "user" | "assistant" | "tool";
 
@@ -66,6 +67,7 @@ export interface PlannerContext<TTurn extends AgentMemoryTurn = AgentMemoryTurn>
   metadata?: Record<string, unknown>;
   iteration: number;
   signal?: AbortSignal;
+  prompt?: readonly AgentMessage[];
 }
 
 export type Planner<TTurn extends AgentMemoryTurn = AgentMemoryTurn> = (

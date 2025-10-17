@@ -34,6 +34,35 @@ import {
   type AgentRunSuccess,
   type AgentStepTrace,
   type AgentToolCollection,
+  type AgentShouldStopDecision,
+  type AgentShouldStopEvaluator,
+  type TokenUsage,
+  type AgentUserMessage,
+  type AgentContextOptions
+} from "./types.js";
+import { isFinalPlan, normalizePlan } from "./plan.js";
+import { withMemoryEventing } from "../telemetry/events.js";
+import { ContextBuilder, type ContextBuildOptions, type ContextDigest } from "./context-builder.js";
+
+const DEFAULT_MAX_ITERATIONS = 8;
+const DEFAULT_MAX_ACTIONS = 4;
+const DEFAULT_STOP_MESSAGE = "Stopping because a configured stop condition was met.";
+const REPEATED_PLAN_MESSAGE =
+  "I'm stopping because the planner repeated the same plan twice without progress.";
+
+interface NormalizedStopDecision {
+  reason?: string;
+  message: AgentAssistantMessage;
+}
+
+interface AgentContextDefaults {
+  baseMessages?: readonly AgentMessage[];
+  ragMessages?: readonly AgentMessage[];
+  digests?: readonly ContextDigest[];
+  maxRecentTurns?: number;
+  maxTokens?: number;
+  maxTurns?: number;
+}
   type TokenUsage,
   type AgentUserMessage
 } from "./types.js";
@@ -54,6 +83,8 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
   private readonly quotas?: AgentQuotaManager;
   private readonly toolCache?: ToolCache;
   private readonly memory: MemoryManager<TTurn>;
+  private readonly contextBuilder: ContextBuilder;
+  private readonly contextDefaults: AgentContextDefaults;
 
   constructor(private readonly config: AgentConfig<TTurn>) {
     if (!config) {
@@ -83,6 +114,20 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
           emit: (event) => this.emit(event),
         })
       : config.memory;
+    const contextConfig = config.context ?? {};
+    if (contextConfig.builder instanceof ContextBuilder) {
+      this.contextBuilder = contextConfig.builder;
+    } else {
+      this.contextBuilder = new ContextBuilder(contextConfig.builder);
+    }
+    this.contextDefaults = {
+      baseMessages: contextConfig.baseMessages,
+      ragMessages: contextConfig.ragMessages,
+      digests: contextConfig.digests,
+      maxRecentTurns: contextConfig.maxRecentTurns,
+      maxTokens: contextConfig.maxTokens,
+      maxTurns: contextConfig.maxTurns,
+    };
   }
 
   get id(): string | undefined {
@@ -153,6 +198,7 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
         const planDuration = performance.now() - planStart;
         const planUsage = extractTokenUsage(plannerResult);
         const plan = normalizePlan(plannerResult);
+        const planSignature = createPlanSignature(plan);
 
         this.emit({
           type: "agent.plan",
@@ -208,6 +254,56 @@ export class Agent<TTurn extends AgentMemoryTurn = AgentMemoryTurn> {
               `Planner returned ${plan.actions.length} actions, exceeding limit of ${this.maxActionsPerPlan}`
             );
           }
+
+          let stopDecision: NormalizedStopDecision | undefined;
+          if (planSignature && previousPlanSignature && planSignature === previousPlanSignature) {
+            stopDecision = {
+              reason: "repeated-plan",
+              message: createAssistantMessage(REPEATED_PLAN_MESSAGE),
+            };
+          } else if (stopEvaluator) {
+            const decision = await stopEvaluator({
+              sessionId,
+              iteration,
+              plan,
+              metadata: mergedMetadata,
+              steps: cloneStepTraces(steps),
+            });
+            stopDecision = normalizeStopDecision(decision);
+          }
+
+          if (stopDecision) {
+            const assistantTurn = this.toMemoryTurn(stopDecision.message);
+            await this.memory.append(sessionId, assistantTurn);
+            steps.push(stepTrace);
+            const elapsedMs = performance.now() - stepHrStart;
+            this.emit({
+              type: "agent.step.done",
+              sessionId,
+              iteration,
+              status: "final",
+              durationMs: elapsedMs,
+              contextTurns: contextStats.turns,
+              contextTokens: contextStats.tokens,
+              plan,
+              actions: stepTrace.actions,
+              output: stopDecision.message,
+              agentId: this.id,
+            });
+            const success = createSuccessResult(steps, runStart, stopDecision.message);
+            this.emit({
+              type: "agent.run.complete",
+              sessionId,
+              output: success.output,
+              steps: success.steps,
+              iterationCount: success.iterationCount,
+              elapsedMs: success.elapsedMs,
+              agentId: this.id,
+            });
+            return success;
+          }
+
+          previousPlanSignature = planSignature;
 
           agentId: this.id
         });
@@ -619,12 +715,203 @@ function createSuccessResult(
   };
 }
 
-function summariseContext(context: readonly AgentMemoryTurn[]): { turns: number; tokens?: number } {
-  let totalTokens: number | undefined;
-  for (const turn of context) {
+function normalizeStopDecision(
+  decision: AgentShouldStopDecision | undefined
+): NormalizedStopDecision | undefined {
+  if (decision === undefined || decision === null || decision === false) {
+    return undefined;
+  }
+  if (decision === true) {
+    return { message: createAssistantMessage(DEFAULT_STOP_MESSAGE) };
+  }
+  if (typeof decision === "string") {
+    return { message: createAssistantMessage(decision) };
+  }
+  if (isAssistantMessage(decision)) {
+    return { message: decision };
+  }
+  if (typeof decision === "object") {
+    const shouldStop = decision.stop ?? true;
+    if (!shouldStop) {
+      return undefined;
+    }
+    const messageValue = decision.message;
+    const message = isAssistantMessage(messageValue)
+      ? messageValue
+      : typeof messageValue === "string"
+        ? createAssistantMessage(messageValue)
+        : createAssistantMessage(DEFAULT_STOP_MESSAGE);
+    const normalized: NormalizedStopDecision = { message };
+    if (typeof decision.reason === "string" && decision.reason.trim() !== "") {
+      normalized.reason = decision.reason;
+    }
+    return normalized;
+  }
+  return undefined;
+}
+
+function createAssistantMessage(content: string): AgentAssistantMessage {
+  return { role: "assistant", content };
+}
+
+function isAssistantMessage(value: unknown): value is AgentAssistantMessage {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    (value as AgentAssistantMessage).role === "assistant" &&
+    typeof (value as AgentAssistantMessage).content === "string"
+  );
+}
+
+function cloneStepTraces(steps: AgentStepTrace[]): readonly AgentStepTrace[] {
+  const snapshot = steps.map((step) => ({
+    iteration: step.iteration,
+    plan: step.plan,
+    actions: step.actions.map((action) => ({ ...action })),
+  }));
+  return snapshot as readonly AgentStepTrace[];
+}
+
+function createPlanSignature(plan: AgentPlan): string | undefined {
+  try {
+    return stablePlanStringify(plan);
+  } catch {
+    return undefined;
+  }
+}
+
+function stablePlanStringify(value: unknown, stack = new Set<unknown>()): string {
+  if (value === null) {
+    return "null";
+  }
+  const type = typeof value;
+  if (type === "number" || type === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (type === "string") {
+    return JSON.stringify(value);
+  }
+  if (type === "bigint") {
+    return JSON.stringify((value as bigint).toString());
+  }
+  if (type === "undefined") {
+    return "undefined";
+  }
+  if (type === "symbol" || type === "function") {
+    return JSON.stringify(String(value));
+  }
+  if (Array.isArray(value)) {
+    if (stack.has(value)) {
+      return JSON.stringify("[Circular]");
+    }
+    stack.add(value);
+    const items = value.map((entry) => stablePlanStringify(entry, stack));
+    stack.delete(value);
+    return `[${items.join(",")}]`;
+  }
+  if (value instanceof Date) {
+    return JSON.stringify(value.toISOString());
+  }
+  if (value instanceof RegExp) {
+    return JSON.stringify(value.toString());
+  }
+  if (value instanceof Set) {
+    if (stack.has(value)) {
+      return JSON.stringify("[Circular Set]");
+    }
+    stack.add(value);
+    const items = Array.from(value)
+      .map((entry) => stablePlanStringify(entry, stack))
+      .sort();
+    stack.delete(value);
+    return `{set:[${items.join(",")}]}`;
+  }
+  if (value instanceof Map) {
+    if (stack.has(value)) {
+      return JSON.stringify("[Circular Map]");
+    }
+    stack.add(value);
+    const entries = Array.from(value.entries())
+      .map(([key, val]) => [stablePlanStringify(key, stack), stablePlanStringify(val, stack)] as const)
+      .sort(([keyA], [keyB]) => keyA.localeCompare(keyB));
+    stack.delete(value);
+    const content = entries.map(([key, val]) => `${key}:${val}`).join(",");
+    return `{map:{${content}}}`;
+  }
+  if (type === "object") {
+    if (stack.has(value as object)) {
+      return JSON.stringify("[Circular]");
+    }
+    stack.add(value as object);
+    const entries = Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stablePlanStringify((value as Record<string, unknown>)[key], stack)}`);
+    stack.delete(value as object);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(String(value));
+}
+
+function buildMemoryContextOptions(
+  overrides: AgentContextOptions | undefined,
+  defaults: AgentContextDefaults
+): MemoryGetContextOptions | undefined {
+  const maxTokensCandidate = overrides?.maxTokens ?? defaults.maxTokens;
+  const maxTurnsCandidate = overrides?.maxTurns ?? defaults.maxTurns;
+
+  const options: MemoryGetContextOptions = {};
+
+  if (isPositiveNumber(maxTokensCandidate)) {
+    options.maxTokens = maxTokensCandidate;
+  }
+  if (isPositiveNumber(maxTurnsCandidate)) {
+    options.maxTurns = Math.floor(maxTurnsCandidate);
+  }
+
+  return Object.keys(options).length > 0 ? options : undefined;
+}
+
+function determineContextBudget(
+  preferred: number | undefined,
+  turns: readonly AgentMemoryTurn[]
+): number {
+  if (isPositiveNumber(preferred)) {
+    return preferred;
+  }
+
+  let total = 0;
+  for (const turn of turns) {
     const tokens = turn.tokens;
-    if (tokens != null) {
-      totalTokens = (totalTokens ?? 0) + tokens;
+    if (isPositiveNumber(tokens)) {
+      total += tokens;
+    }
+  }
+
+  if (total > 0) {
+    return total;
+  }
+
+  const heuristic = Math.max(512, turns.length * 256);
+  return heuristic > 0 ? heuristic : 512;
+}
+
+function isPositiveNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function summariseContext(
+  context: readonly AgentMemoryTurn[],
+  promptTokens?: number
+): { turns: number; tokens?: number } {
+  let totalTokens: number | undefined;
+  if (isPositiveNumber(promptTokens)) {
+    totalTokens = promptTokens;
+  } else {
+    for (const turn of context) {
+      const tokens = turn.tokens;
+      if (isPositiveNumber(tokens)) {
+        totalTokens = (totalTokens ?? 0) + tokens;
+      }
     }
   }
   return { turns: context.length, tokens: totalTokens };

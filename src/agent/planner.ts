@@ -1,4 +1,4 @@
-import { turnsToMessages } from "./history.js";
+import { agentMessagesToMessages, turnsToMessages } from "./history.js";
 import { normalizePlan } from "./plan.js";
 import type {
   AgentMemoryTurn,
@@ -88,9 +88,11 @@ export function createJsonPlanner<TTurn extends AgentMemoryTurn = AgentMemoryTur
   const fallback = options.fallback ?? defaultFallback;
 
   return async (context) => {
-    const historyMessages = turnsToMessages(context.context);
+    let historyMessages = context.prompt
+      ? agentMessagesToMessages(context.prompt)
+      : turnsToMessages(context.context);
     if (historyMessages.length === 0) {
-      historyMessages.push({ role: context.input.role, content: context.input.content });
+      historyMessages = [{ role: context.input.role, content: context.input.content }];
     }
 
     const messages: Message[] = [
