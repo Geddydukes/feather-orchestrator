@@ -151,6 +151,44 @@ export function anthropic(cfg: AnthropicConfig): ChatProvider {
         if (aborted) {
           throw createAbortError(opts?.signal?.reason);
         }
+      };
+
+      if (opts?.signal) {
+        if (opts.signal.aborted) {
+          onAbort();
+          throw createAbortError(opts.signal.reason);
+        }
+        opts.signal.addEventListener("abort", onAbort, { once: true });
+      }
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          for (const line of chunk.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith("data:")) continue;
+            const payload = trimmed.slice(5).trim();
+            if (payload === "[DONE]") return;
+            try {
+              const json = JSON.parse(payload);
+              const delta = json.delta?.text ?? json.content_block?.text ?? "";
+              if (delta) yield { content: delta };
+            } catch {}
+          }
+        }
+      } finally {
+        if (opts?.signal) {
+          opts.signal.removeEventListener("abort", onAbort);
+        }
+        if (typeof reader.releaseLock === "function") {
+          reader.releaseLock();
+        }
+        if (aborted) {
+          throw createAbortError(opts?.signal?.reason);
+        }
+      } finally {
+        reader.releaseLock();
       }
     },
     price: pricing,
