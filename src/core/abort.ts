@@ -4,7 +4,13 @@ export function createAbortError(reason?: unknown): Error {
   }
 
   if (reason instanceof Error) {
-    return new DOMException(reason.message || "Aborted", "AbortError");
+    const abort = new DOMException(reason.message || "Aborted", "AbortError");
+    try {
+      (abort as any).cause = reason;
+    } catch {
+      // Ignore if cause is read-only.
+    }
+    return abort;
   }
 
   return new DOMException("Aborted", "AbortError");

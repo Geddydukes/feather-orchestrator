@@ -54,11 +54,11 @@ export function anthropic(cfg: AnthropicConfig): ChatProvider {
         }),
         signal: opts?.signal
       });
-      const requestId = response.headers?.get?.("request-id") ?? response.headers?.get?.("x-request-id") ?? undefined;
+      const requestId = getHeader(response, "request-id") ?? getHeader(response, "x-request-id") ?? undefined;
       if (!response.ok) {
         const message = await readErrorPayload(response);
         throw new LLMError(
-          `Anthropic error ${response.status}: ${message}`,
+          `Anthropic ${response.status}: ${message}`,
           "anthropic",
           response.status,
           requestId,
@@ -91,11 +91,11 @@ export function anthropic(cfg: AnthropicConfig): ChatProvider {
         }),
         signal: opts?.signal
       });
-      const requestId = response.headers?.get?.("request-id") ?? response.headers?.get?.("x-request-id") ?? undefined;
+      const requestId = getHeader(response, "request-id") ?? getHeader(response, "x-request-id") ?? undefined;
       if (!response.ok || !response.body) {
         const message = await readErrorPayload(response);
         throw new LLMError(
-          `Anthropic stream error ${response.status}: ${message}`,
+          `Anthropic ${response.status}: ${message}`,
           "anthropic",
           response.status,
           requestId,
@@ -112,7 +112,9 @@ export function anthropic(cfg: AnthropicConfig): ChatProvider {
           return;
         }
         aborted = true;
-        reader.cancel().catch(() => {});
+        if (typeof reader.cancel === "function") {
+          Promise.resolve(reader.cancel()).catch(() => {});
+        }
       };
 
       if (opts?.signal) {
@@ -143,7 +145,9 @@ export function anthropic(cfg: AnthropicConfig): ChatProvider {
         if (opts?.signal) {
           opts.signal.removeEventListener("abort", onAbort);
         }
-        reader.releaseLock();
+        if (typeof reader.releaseLock === "function") {
+          reader.releaseLock();
+        }
         if (aborted) {
           throw createAbortError(opts?.signal?.reason);
         }
@@ -185,7 +189,7 @@ async function readErrorPayload(response: Response): Promise<string> {
 }
 
 function parseRetryAfter(response: Response): number | undefined {
-  const header = response.headers?.get?.("retry-after");
+  const header = getHeader(response, "retry-after");
   if (!header) {
     return undefined;
   }
@@ -203,4 +207,16 @@ function parseRetryAfter(response: Response): number | undefined {
 
 function isRetryableStatus(status: number): boolean {
   return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
+function getHeader(response: Response, name: string): string | undefined {
+  const headers = (response as { headers?: unknown }).headers;
+  if (!headers || typeof (headers as { get?: unknown }).get !== "function") {
+    return undefined;
+  }
+  try {
+    return (headers as Headers).get(name) ?? undefined;
+  } catch {
+    return undefined;
+  }
 }

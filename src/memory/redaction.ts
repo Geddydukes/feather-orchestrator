@@ -83,7 +83,11 @@ class RedactingMemoryManager<TTurn extends MemoryTurn> implements MemoryManager<
   }
 
   async append(sessionId: string, turn: TTurn): Promise<void> {
-    await this.base.append(sessionId, cloneTurn(turn));
+    const processed = this.applyRedaction(sessionId, turn);
+    if (processed === null) {
+      return;
+    }
+    await this.base.append(sessionId, processed);
   }
 
   async getContext(
